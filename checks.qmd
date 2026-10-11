@@ -1,0 +1,85 @@
+---
+title: "Data checks"
+# Maintainer page: not in the navbar and kept out of search engines.
+include-in-header:
+  - text: '<meta name="robots" content="noindex">'
+---
+
+{{< include _load.qmd >}}
+
+Every time the site loads, it checks `data/database.xlsx`. A Verified or Unverified record that fails a check is **hidden from every page** until the workbook is fixed, and is listed below.
+
+```{ojs}
+{
+  const rowsBySheet = [
+    ["Organisations", data.orgsAll.length],
+    ["Opportunities", data.oppsAll.length],
+    ["Places", data.placesAll.length],
+    ["About", data.about.length]
+  ];
+  const statuses = ["Verified", "Unverified", "Excluded"];
+  const other = [...data.statusCounts].filter(([k]) => !statuses.includes(k));
+  const shownVerified = opps.filter(o => o.verified).length;
+  return htl.html`<div class="tile-grid tile-grid-3">
+    <section class="tile" aria-labelledby="h-rows">
+      <h2 id="h-rows" class="tile-title">Rows read per sheet</h2>
+      <table class="data-table compact">
+        <thead><tr><th scope="col">Sheet</th><th scope="col" class="num">Rows</th></tr></thead>
+        <tbody>${rowsBySheet.map(([s, n]) => htl.html`<tr><th scope="row">${s}</th><td class="num">${n}</td></tr>`)}</tbody>
+      </table>
+    </section>
+    <section class="tile" aria-labelledby="h-status">
+      <h2 id="h-status" class="tile-title">Opportunities by status</h2>
+      <table class="data-table compact">
+        <thead><tr><th scope="col">verification_status</th><th scope="col" class="num">Rows</th></tr></thead>
+        <tbody>
+          ${statuses.map(s => htl.html`<tr><th scope="row">${s}</th><td class="num">${data.statusCounts.get(s) ?? 0}</td></tr>`)}
+          ${other.map(([s, n]) => htl.html`<tr><th scope="row">${s}</th><td class="num">${n}</td></tr>`)}
+        </tbody>
+      </table>
+    </section>
+    <section class="tile" aria-labelledby="h-shown">
+      <h2 id="h-shown" class="tile-title">Shown on the site</h2>
+      <table class="data-table compact">
+        <tbody>
+          <tr><th scope="row">Opportunities shown</th><td class="num">${opps.length}</td></tr>
+          <tr><th scope="row">Verified / Unverified</th><td class="num">${shownVerified} / ${opps.length - shownVerified}</td></tr>
+          <tr><th scope="row">Hidden by a failing check</th><td class="num">${data.hiddenCount}</td></tr>
+          <tr><th scope="row">Organisations shown</th><td class="num">${data.orgs.length}</td></tr>
+          <tr><th scope="row">Host cities / countries</th><td class="num">${data.places.length} / ${countries.length}</td></tr>
+          <tr><th scope="row">Latest last_checked</th><td class="num">${data.snapshot ? fmtDate(data.snapshot) : "–"}</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </div>`;
+}
+```
+
+## Failing rows
+
+```{ojs}
+{
+  const ps = data.problems;
+  if (!ps.length) return htl.html`<p class="check-ok" role="status"><strong>No problems found.</strong> Every Verified and Unverified record passes all checks, and all ${opps.length} are shown.</p>`;
+  return htl.html`<p class="check-fail" role="status"><strong>${plural(ps.length, "problem")} found</strong>; ${plural(data.hiddenCount, "record is", "records are")} hidden until fixed.</p>
+  <div class="table-scroll"><table class="data-table">
+    <caption>Rows that fail a data check</caption>
+    <thead><tr><th scope="col">Sheet</th><th scope="col">ID</th><th scope="col">Field</th><th scope="col">Problem</th></tr></thead>
+    <tbody>${ps.map(p => htl.html`<tr><td>${p.sheet}</td><th scope="row">${p.id}</th><td><code>${p.field}</code></td><td>${p.problem}</td></tr>`)}</tbody>
+  </table></div>`;
+}
+```
+
+## What is checked
+
+Checks apply to Verified and Unverified records (and to the organisations and host cities they use) unless stated.
+
+1. Required fields present: `opportunity_id`, `org_id`, `name`, `opportunity_type`, `discipline_area`, `funding_type`, `duration_max_weeks`, `host_city`, `source_url`, `verification_status`, `last_checked`. An Unverified record may leave `duration_max_weeks` blank when the duration is the detail still to confirm.
+2. `org_id` exists in Organisations.
+3. `host_city` exists in Places, with numeric latitude and longitude.
+4. Values come from the allowed lists (organisation type, visa value, contact type, opportunity type, discipline, funding type, verification status on every row).
+5. `duration_max_weeks` is 26 or less.
+6. Verified records: `source_official` is Yes and `status_reasons` is empty.
+7. Unverified records: `status_reasons` names the missing detail.
+8. `opportunity_id` and `org_id` are unique across all rows.
+9. URLs start with `http` (`contact_page` may also be a `mailto:` link).

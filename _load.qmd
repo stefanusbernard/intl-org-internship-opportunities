@@ -1,0 +1,777 @@
+```{ojs}
+//| output: false
+
+// ===================================================================
+// Shared data layer, included in every page with {{< include _load.qmd >}}.
+// Loads data/database.xlsx in the browser, normalises cells, joins the
+// sheets, runs the data checks and derives the rows shown on the site.
+// Also holds URL state (compare selection) and shared render helpers.
+// ===================================================================
+
+workbook = FileAttachment("data/database.xlsx").xlsx()
+
+// ---- Data contract ---------------------------------------------------
+
+SHEET_COLUMNS = ({
+  Organisations: ["org_id", "name", "org_type", "country", "city", "website", "official_domains",
+    "careers_page", "contact_page", "contact_type", "visa_exempt", "visa_scope", "visa_note",
+    "visa_source_url", "seed_source", "last_checked", "notes"],
+  Opportunities: ["opportunity_id", "org_id", "name", "summary", "opportunity_type", "discipline_area",
+    "career_stage", "funding_type", "funding_amount", "funding_currency", "funding_period",
+    "funding_note", "duration_max_weeks", "duration_note", "nationality_note", "host_city",
+    "location_note", "location_country", "deadline_type", "next_deadline", "application_url",
+    "source_url", "source_official", "verification_status", "status_reasons", "last_checked"],
+  Places: ["city", "country", "latitude", "longitude", "visa_rule", "visa_rule_source"],
+  About: ["text"]
+})
+
+ENUMS = ({
+  org_type: ["Intergovernmental", "UN agency", "EU institution", "International NGO", "International foundation or union"],
+  visa_exempt: ["Yes", "No", "Not stated"],
+  contact_type: ["general contact page", "programme or general inbox", "media/press contact page"],
+  verification_status: ["Verified", "Unverified", "Excluded"],
+  opportunity_type: ["Internship", "Traineeship", "Fellowship", "Travel grant", "PhD visit", "Visiting researcher"],
+  discipline_area: ["STEM", "Social sciences", "Any"],
+  funding_type: ["Salary", "Stipend or allowance", "Fellowship", "Grant"]
+})
+
+RESEARCH_TYPES = ["Fellowship", "Travel grant", "PhD visit", "Visiting researcher"]
+SHOWN_STATUSES = ["Verified", "Unverified"]
+REQUIRED_OPP_FIELDS = ["opportunity_id", "org_id", "name", "opportunity_type", "discipline_area",
+  "funding_type", "duration_max_weeks", "host_city", "source_url", "verification_status", "last_checked"]
+NUMERIC_COLUMNS = new Set(["latitude", "longitude", "duration_max_weeks", "funding_amount"])
+
+DISCIPLINE_COLOURS = ({ "STEM": "#1E63C4", "Social sciences": "#D2741F", "Any": "#5E6A75" })
+DISCIPLINE_LABELS = ({ "STEM": "STEM", "Social sciences": "Social sciences", "Any": "Any field" })
+
+// ---- Cell normalisation ------------------------------------------------
+
+function normValue(v) {
+  if (v == null) return null;
+  if (v instanceof Date) return isNaN(v) ? null : v.toISOString().slice(0, 10);
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (typeof v === "object") {
+    if ("result" in v) return normValue(v.result);
+    if (v.richText) return normValue(v.richText.map(t => t.text).join(""));
+    if (v.text != null) return normValue(typeof v.text === "object" ? v.text.richText?.map(t => t.text).join("") : v.text);
+    if (v.hyperlink) return normValue(v.hyperlink);
+    return null;
+  }
+  const s = String(v).replace(/\u00a0/g, " ").trim();
+  return s === "" ? null : s;
+}
+
+// Reads a sheet by its header row (row 1). Returns the non-empty rows keyed by
+// header name plus any expected columns that are missing.
+function readSheet(name) {
+  const expected = SHEET_COLUMNS[name];
+  if (!workbook.sheetNames.includes(name)) return { rows: [], missing: expected, sheetMissing: true };
+  const grid = workbook.sheet(name);
+  if (!grid.length) return { rows: [], missing: expected, sheetMissing: false };
+  const header = {};
+  for (const [col, v] of Object.entries(grid[0])) {
+    const h = normValue(v);
+    if (h != null) header[col] = String(h);
+  }
+  const present = new Set(Object.values(header));
+  const rows = [];
+  for (let i = 1; i < grid.length; i++) {
+    const raw = grid[i];
+    const r = { _row: i + 1 };
+    let any = false;
+    for (const [col, h] of Object.entries(header)) {
+      let v = normValue(raw[col]);
+      if (v != null && NUMERIC_COLUMNS.has(h) && typeof v === "string") {
+        const n = Number(v.replace(/,/g, ""));
+        if (Number.isFinite(n)) v = n;
+      }
+      if (v != null && typeof v === "number" && !NUMERIC_COLUMNS.has(h)) v = String(v);
+      if (v != null) any = true;
+      r[h] = v;
+    }
+    if (!any) continue;
+    for (const c of expected) if (!(c in r)) r[c] = null;
+    rows.push(r);
+  }
+  return { rows, missing: expected.filter(c => !present.has(c)), sheetMissing: false };
+}
+
+// ---- Small helpers ---------------------------------------------------------
+
+function slugify(s) {
+  return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().trim().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+}
+
+function isUrl(v) { return typeof v === "string" && /^https?:\/\//i.test(v); }
+
+// Career-stage filters are a text match on the free-text career_stage field.
+function careerText(s) { return String(s ?? "").toLowerCase().replace(/[\u2018\u2019]/g, "'"); }
+function isPhdEligible(s) {
+  const t = careerText(s);
+  if (/phd students? (are )?not eligible|not yet in a phd/.test(t)) return false;
+  return /\bph\.?d\b|doctora|post-?graduate/.test(t);
+}
+function isMastersEligible(s) {
+  const t = careerText(s);
+  return /master|post-?graduate|(^|[^a-z-])graduate (students?|or|and)\b/.test(t);
+}
+
+// A deadline is a real date when it starts with an ISO date (YYYY-MM-DD).
+function deadlineDate(v) {
+  if (typeof v !== "string") return null;
+  const m = v.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return isNaN(d) ? null : d;
+}
+
+function fmtDate(v, opts = { day: "numeric", month: "short", year: "numeric" }) {
+  const d = v instanceof Date ? v : deadlineDate(v);
+  if (!d) return v ?? "";
+  return d.toLocaleDateString("en-GB", { ...opts, timeZone: "UTC" });
+}
+
+function fmtNumber(n) { return Number(n).toLocaleString("en-GB", { maximumFractionDigits: 2 }); }
+
+function plural(n, one, many = one + "s") { return `${n} ${n === 1 ? one : many}`; }
+
+// ---- Load, check and derive ----------------------------------------------
+
+data = {
+  const problems = [];
+  const flag = (sheet, id, field, problem, hidesOpp = null) =>
+    problems.push({ sheet, id: id ?? "(no id)", field, problem, hidesOpp });
+
+  const sheets = {};
+  for (const name of Object.keys(SHEET_COLUMNS)) {
+    const s = readSheet(name);
+    sheets[name] = s;
+    if (s.sheetMissing) flag(name, "(sheet)", "-", `Sheet "${name}" not found in the workbook`);
+    else for (const c of s.missing) flag(name, "(header)", c, "Column missing from the header row");
+  }
+  const orgsAll = sheets.Organisations.rows;
+  const oppsAll = sheets.Opportunities.rows;
+  const placesAll = sheets.Places.rows;
+  const about = sheets.About.rows.map(r => r.text).filter(t => t != null).map(String);
+
+  // Check 8: unique ids across all rows.
+  const dupes = (rows, key) => {
+    const seen = new Map();
+    for (const r of rows) if (r[key] != null) seen.set(r[key], (seen.get(r[key]) ?? 0) + 1);
+    return new Set([...seen].filter(([, n]) => n > 1).map(([k]) => k));
+  };
+  const dupOpp = dupes(oppsAll, "opportunity_id");
+  const dupOrg = dupes(orgsAll, "org_id");
+  for (const id of dupOpp) flag("Opportunities", id, "opportunity_id", "Duplicate opportunity_id");
+  for (const id of dupOrg) flag("Organisations", id, "org_id", "Duplicate org_id");
+
+  const orgById = new Map(orgsAll.filter(o => o.org_id != null).map(o => [o.org_id, o]));
+  const placeByCity = new Map(placesAll.filter(p => p.city != null).map(p => [p.city, p]));
+
+  // Status must be valid on every row (otherwise a record silently disappears).
+  for (const o of oppsAll) {
+    if (o.verification_status == null) flag("Opportunities", o.opportunity_id, "verification_status", `Missing (row ${o._row})`);
+    else if (!ENUMS.verification_status.includes(o.verification_status))
+      flag("Opportunities", o.opportunity_id, "verification_status", `Invalid value "${o.verification_status}"`);
+  }
+
+  const candidates = oppsAll.filter(o => SHOWN_STATUSES.includes(o.verification_status));
+  const hidden = new Set();
+  const fail = (o, field, problem) => {
+    flag("Opportunities", o.opportunity_id, field, problem, o);
+    hidden.add(o);
+  };
+
+  // Organisation-level checks, for organisations with a candidate opportunity.
+  const badOrgs = new Map();
+  const usedOrgIds = new Set(candidates.map(o => o.org_id).filter(Boolean));
+  for (const id of usedOrgIds) {
+    const g = orgById.get(id);
+    if (!g) continue;
+    const reasons = [];
+    for (const f of ["org_type", "visa_exempt"]) {
+      if (g[f] == null) reasons.push([f, "Missing"]);
+      else if (!ENUMS[f].includes(g[f])) reasons.push([f, `Invalid value "${g[f]}"`]);
+    }
+    if (g.contact_type != null && !ENUMS.contact_type.includes(g.contact_type))
+      reasons.push(["contact_type", `Invalid value "${g.contact_type}"`]);
+    for (const f of ["website", "careers_page", "visa_source_url"])
+      if (g[f] != null && !isUrl(g[f])) reasons.push([f, "URL must start with http"]);
+    if (g.contact_page != null && !isUrl(g.contact_page) && !/^mailto:/i.test(g.contact_page))
+      reasons.push(["contact_page", "Must start with http or mailto:"]);
+    if (dupOrg.has(id)) reasons.push(["org_id", "Duplicate org_id"]);
+    for (const [field, problem] of reasons) flag("Organisations", id, field, problem);
+    if (reasons.length) badOrgs.set(id, reasons);
+  }
+
+  // Place-level checks, for host cities used by a candidate opportunity.
+  const badPlaces = new Map();
+  for (const city of new Set(candidates.map(o => o.host_city).filter(Boolean))) {
+    const p = placeByCity.get(city);
+    if (!p) continue;
+    const reasons = [];
+    if (typeof p.latitude !== "number" || Math.abs(p.latitude) > 90) reasons.push(["latitude", "Not a valid number"]);
+    if (typeof p.longitude !== "number" || Math.abs(p.longitude) > 180) reasons.push(["longitude", "Not a valid number"]);
+    if (p.country == null) reasons.push(["country", "Missing"]);
+    if (p.visa_rule_source != null && !isUrl(p.visa_rule_source)) reasons.push(["visa_rule_source", "URL must start with http"]);
+    for (const [field, problem] of reasons) flag("Places", city, field, problem);
+    if (reasons.length) badPlaces.set(city, reasons);
+  }
+
+  // Opportunity-level checks (shown rows only).
+  for (const o of candidates) {
+    // 1. Required fields. duration_max_weeks may be blank on an Unverified row
+    //    (an unconfirmed duration is a valid "missing detail").
+    for (const f of REQUIRED_OPP_FIELDS) {
+      if (o[f] != null) continue;
+      if (f === "duration_max_weeks" && o.verification_status === "Unverified") continue;
+      fail(o, f, "Required field is empty");
+    }
+    // 2. Organisation exists.
+    if (o.org_id != null && !orgById.has(o.org_id)) fail(o, "org_id", `No organisation with org_id "${o.org_id}"`);
+    else if (badOrgs.has(o.org_id)) fail(o, "org_id", "Its organisation row fails a check (see Organisations)");
+    // 3. Host city exists in Places with coordinates.
+    if (o.host_city != null && !placeByCity.has(o.host_city)) fail(o, "host_city", `"${o.host_city}" is not in Places`);
+    else if (badPlaces.has(o.host_city)) fail(o, "host_city", "Its Places row has no valid coordinates (see Places)");
+    // 4. Enum values.
+    for (const f of ["opportunity_type", "discipline_area", "funding_type"])
+      if (o[f] != null && !ENUMS[f].includes(o[f])) fail(o, f, `Invalid value "${o[f]}"`);
+    // 5. Duration.
+    if (o.duration_max_weeks != null) {
+      if (typeof o.duration_max_weeks !== "number") fail(o, "duration_max_weeks", "Not a number");
+      else if (o.duration_max_weeks > 26) fail(o, "duration_max_weeks", `${o.duration_max_weeks} weeks is over 26`);
+    }
+    if (o.funding_amount != null && typeof o.funding_amount !== "number") fail(o, "funding_amount", "Not a number");
+    // 6. Verified rows.
+    if (o.verification_status === "Verified") {
+      if (o.source_official !== "Yes") fail(o, "source_official", "Must be Yes for a Verified record");
+      if (o.status_reasons != null) fail(o, "status_reasons", "Must be empty for a Verified record");
+    }
+    // 7. Unverified rows.
+    if (o.verification_status === "Unverified" && o.status_reasons == null)
+      fail(o, "status_reasons", "Must name the missing detail for an Unverified record");
+    // 8. Unique id.
+    if (dupOpp.has(o.opportunity_id)) fail(o, "opportunity_id", "Duplicate opportunity_id");
+    // 9. URLs.
+    for (const f of ["source_url", "application_url"])
+      if (o[f] != null && !isUrl(o[f])) fail(o, f, "URL must start with http");
+  }
+
+  // Derived shown rows.
+  const opps = candidates.filter(o => !hidden.has(o)).map(o => {
+    const org = orgById.get(o.org_id);
+    const place = placeByCity.get(o.host_city);
+    const dl = deadlineDate(o.next_deadline);
+    return {
+      ...o,
+      id: o.opportunity_id,
+      org,
+      place,
+      city: place.city,
+      country: place.country,
+      citySlug: slugify(place.city),
+      countrySlug: slugify(place.country),
+      isResearch: RESEARCH_TYPES.includes(o.opportunity_type),
+      disciplines: o.discipline_area === "Any" ? ["STEM", "Social sciences"] : [o.discipline_area],
+      phd: isPhdEligible(o.career_stage),
+      masters: isMastersEligible(o.career_stage),
+      hasAmount: typeof o.funding_amount === "number",
+      deadline: dl,
+      verified: o.verification_status === "Verified",
+      visaExempt: org.visa_exempt === "Yes"
+    };
+  });
+
+  const orgs = [...d3.group(opps, o => o.org_id)].map(([id, list]) => ({
+    ...orgById.get(id), opps: list, slug: id
+  }));
+
+  const placeMap = d3.group(opps, o => o.city);
+  const places = [...placeMap].map(([city, list]) => {
+    const p = placeByCity.get(city);
+    return { ...p, slug: slugify(city), countrySlug: slugify(p.country), opps: list };
+  });
+
+  const snapshot = d3.max(opps, o => o.last_checked) ?? null;
+
+  return {
+    orgsAll, oppsAll, placesAll, about, problems, hiddenCount: hidden.size,
+    opps, orgs, places, snapshot, orgById, placeByCity,
+    statusCounts: d3.rollup(oppsAll, v => v.length, o => o.verification_status ?? "(blank)")
+  };
+}
+
+opps = data.opps
+countries = d3.sort(d3.groups(opps, o => o.country), ([c]) => c).map(([country, list]) => ({
+  country, slug: slugify(country), opps: list, cities: [...new Set(list.map(o => o.city))].sort()
+}))
+
+// ---- Filters (shared by Opportunities and filter-aware home) -------------------
+
+TYPE_FILTERS = ({
+  research: { label: "Research visit", test: o => o.isResearch },
+  internship: { label: "Internship", test: o => o.opportunity_type === "Internship" },
+  traineeship: { label: "Traineeship", test: o => o.opportunity_type === "Traineeship" }
+})
+STAGE_FILTERS = ({
+  phd: { label: "PhD eligible", test: o => o.phd },
+  masters: { label: "Master's eligible", test: o => o.masters }
+})
+DISCIPLINE_FILTERS = ({ "stem": "STEM", "social-sciences": "Social sciences" })
+// deadline_type values; Rolling (apply any time) is the most stable, so it comes first.
+DEADLINE_FILTERS = ({
+  rolling: { label: "Rolling", value: "Rolling" },
+  adhoc: { label: "Ad hoc vacancies", value: "Ad hoc vacancies" },
+  fixed: { label: "Fixed (annual or rounds)", value: "Fixed (annual or rounds)" }
+})
+DEADLINE_ORDER = ["Rolling", "Ad hoc vacancies", "Fixed (annual or rounds)"]
+SORTS = ({ rolling: "Rolling first", country: "Country", amount: "Amount", duration: "Duration", name: "Name", deadline: "Deadline" })
+DEFAULT_SORT = "rolling"
+
+urlParams = new URLSearchParams(location.search)
+
+// Normalises raw URL parameters into the filter state.
+function readFilterState(p) {
+  const get = k => (p.get(k) ?? "").trim();
+  const lower = k => get(k).toLowerCase();
+  const disc = slugify(get("discipline"));
+  const truthy = k => ["1", "yes", "true"].includes(lower(k));
+  return {
+    q: get("q"),
+    discipline: DISCIPLINE_FILTERS[disc] ? disc : "",
+    type: TYPE_FILTERS[lower("type")] ? lower("type") : "",
+    stage: STAGE_FILTERS[lower("stage")] ? lower("stage") : "",
+    country: slugify(get("country")),
+    deadline: DEADLINE_FILTERS[lower("deadline")] ? lower("deadline") : "",
+    verified: truthy("verified"),
+    visa: truthy("visa"),
+    amount: truthy("amount"),
+    sort: SORTS[lower("sort")] ? lower("sort") : DEFAULT_SORT,
+    view: lower("view") === "organisations" ? "organisations" : "opportunities"
+  };
+}
+
+function filterParams(f) {
+  return {
+    q: f.q || null, discipline: f.discipline || null, type: f.type || null, stage: f.stage || null,
+    country: f.country || null, deadline: f.deadline || null, verified: f.verified ? "1" : null, visa: f.visa ? "1" : null,
+    amount: f.amount ? "1" : null, sort: f.sort && f.sort !== DEFAULT_SORT ? f.sort : null,
+    view: f.view === "organisations" ? "organisations" : null
+  };
+}
+
+function matchesSearch(o, q) {
+  if (!q) return true;
+  const hay = [o.name, o.org?.name, o.summary, o.city, o.country, o.location_note]
+    .filter(Boolean).join(" ").toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w));
+}
+
+function applyFilters(rows, f) {
+  return rows.filter(o =>
+    matchesSearch(o, f.q) &&
+    (!f.discipline || o.disciplines.includes(DISCIPLINE_FILTERS[f.discipline])) &&
+    (!f.type || TYPE_FILTERS[f.type].test(o)) &&
+    (!f.stage || STAGE_FILTERS[f.stage].test(o)) &&
+    (!f.country || o.countrySlug === f.country) &&
+    (!f.deadline || o.deadline_type === DEADLINE_FILTERS[f.deadline].value) &&
+    (!f.verified || o.verified) &&
+    (!f.visa || o.visaExempt) &&
+    (!f.amount || o.hasAmount));
+}
+
+// Plain-language list of the active filters, for result counts and empty states.
+function describeFilters(f) {
+  const out = [];
+  if (f.q) out.push(`search "${f.q}"`);
+  if (f.discipline) out.push(`discipline: ${DISCIPLINE_FILTERS[f.discipline]}`);
+  if (f.type) out.push(`type: ${TYPE_FILTERS[f.type].label}`);
+  if (f.stage) out.push(STAGE_FILTERS[f.stage].label);
+  if (f.country) out.push(`country: ${countries.find(c => c.slug === f.country)?.country ?? f.country}`);
+  if (f.deadline) out.push(`deadline: ${DEADLINE_FILTERS[f.deadline].label}`);
+  if (f.verified) out.push("verified only");
+  if (f.visa) out.push("visa-exempt: yes");
+  if (f.amount) out.push("amount stated");
+  return out;
+}
+
+function sortRows(rows, sort) {
+  const byName = (a, b) => d3.ascending(a.name, b.name);
+  const byCountry = (a, b) => d3.ascending(a.country, b.country) || d3.ascending(a.org.name, b.org.name) || byName(a, b);
+  const nullsLast = (a, b, fa, fb) => (a == null) - (b == null) || fa(a, b);
+  const deadlineRank = o => { const i = DEADLINE_ORDER.indexOf(o.deadline_type); return i < 0 ? DEADLINE_ORDER.length : i; };
+  const cmp = {
+    rolling: (a, b) => d3.ascending(deadlineRank(a), deadlineRank(b)) || byCountry(a, b),
+    country: byCountry,
+    name: (a, b) => byName(a, b) || byCountry(a, b),
+    // Amounts compare only within the same currency and period; highest first.
+    amount: (a, b) => (b.hasAmount - a.hasAmount)
+      || d3.ascending(a.funding_currency ?? "~", b.funding_currency ?? "~")
+      || d3.ascending(a.funding_period ?? "~", b.funding_period ?? "~")
+      || d3.descending(a.funding_amount, b.funding_amount) || byCountry(a, b),
+    duration: (a, b) => nullsLast(a.duration_max_weeks, b.duration_max_weeks, d3.descending) || byCountry(a, b),
+    deadline: (a, b) => nullsLast(a.deadline, b.deadline, d3.ascending) || byCountry(a, b)
+  }[sort] ?? byCountry;
+  // (place and organisation pages pass "country"; the Opportunities list defaults to "rolling")
+  return [...rows].sort(cmp);
+}
+
+// ---- URL helpers --------------------------------------------------------------
+
+// Builds a readable query string (commas and spaces kept legible). Null values are dropped.
+function qs(params) {
+  const parts = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (v == null || v === "") continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(v).replace(/%2C/gi, ",").replace(/%20/g, "+")}`);
+  }
+  return parts.length ? "?" + parts.join("&") : "";
+}
+
+// Replaces the given keys in the current URL without reloading or adding history entries.
+function updateUrl(changes) {
+  const p = Object.fromEntries(new URLSearchParams(location.search));
+  Object.assign(p, changes);
+  history.replaceState(history.state, "", location.pathname + qs(p) + location.hash);
+}
+
+// ---- Compare selection (held in ?compare=) ----------------------------------------
+
+compareStore = {
+  const valid = new Set(opps.map(o => o.id));
+  let ids = [...new Set((urlParams.get("compare") ?? "").split(",").map(s => s.trim()).filter(s => valid.has(s)))].slice(0, 3);
+  const subs = new Set();
+  const set = next => {
+    ids = next.slice(0, 3);
+    updateUrl({ compare: ids.length ? ids.join(",") : null });
+    for (const f of subs) f(ids.slice());
+  };
+  return {
+    get: () => ids.slice(),
+    has: id => ids.includes(id),
+    set,
+    remove: id => set(ids.filter(x => x !== id)),
+    add(id, opener) {
+      if (ids.includes(id)) return;
+      if (ids.length < 3) return set([...ids, id]);
+      askReplace(id, ids, replaced => set(ids.map(x => (x === replaced ? id : x))), opener);
+    },
+    subscribe(f) { subs.add(f); return () => subs.delete(f); }
+  };
+}
+
+compareIds = Generators.observe(notify => {
+  notify(compareStore.get());
+  return compareStore.subscribe(notify);
+})
+
+// Asks which of the three selected opportunities to replace (native modal dialog).
+function askReplace(newId, current, onReplace, opener) {
+  const byId = id => opps.find(o => o.id === id);
+  const dlg = htl.html`<dialog class="replace-dialog" aria-labelledby="replace-title">
+    <h2 id="replace-title">Compare holds three opportunities</h2>
+    <p>Choose one to replace with <strong>${byId(newId)?.name}</strong>.</p>
+    <div class="replace-options">
+      ${current.map(id => htl.html`<button type="button" class="btn-replace" onclick=${() => { dlg.close(); onReplace(id); }}>
+        Replace ${byId(id)?.name} <span class="muted">(${byId(id)?.org.name})</span></button>`)}
+      <button type="button" class="btn-plain" onclick=${() => dlg.close()}>Cancel</button>
+    </div>
+  </dialog>`;
+  dlg.addEventListener("close", () => { dlg.remove(); opener?.focus(); });
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+// Keeps ?compare= on every internal link, so the selection follows the visitor.
+compareLinks = {
+  const fix = e => {
+    const a = e.target?.closest?.("a[href]");
+    if (!a || a.hasAttribute("data-no-state")) return;
+    const url = new URL(a.getAttribute("href"), location.href);
+    if (url.origin !== location.origin || !/(\.html|\/)$/.test(url.pathname)) return;
+    const p = Object.fromEntries(url.searchParams);
+    const ids = compareStore.get();
+    p.compare = ids.length ? ids.join(",") : null;
+    a.setAttribute("href", url.pathname + qs(p) + url.hash);
+  };
+  const types = ["pointerdown", "focusin", "click", "auxclick"];
+  for (const t of types) document.addEventListener(t, fix, true);
+  invalidation.then(() => { for (const t of types) document.removeEventListener(t, fix, true); });
+  return true;
+}
+
+// Navbar: "Compare (n)" link reflects the selection.
+navCompare = {
+  for (const a of document.querySelectorAll('a.nav-link[href*="#compare"]')) {
+    const label = a.querySelector(".menu-text") ?? a;
+    label.textContent = `Compare (${compareIds.length})`;
+    a.setAttribute("aria-label", `Compare, ${plural(compareIds.length, "opportunity", "opportunities")} selected`);
+    a.setAttribute("href", "opportunities.html" + qs({ compare: compareIds.join(",") || null }) + "#compare");
+    a.classList.remove("active");
+    a.removeAttribute("aria-current");
+  }
+  return compareIds.length;
+}
+
+// Footer: copyright (static, in _quarto.yml) + snapshot date (latest last_checked among shown records).
+footerSnapshot = {
+  const el = document.querySelector(".nav-footer-center");
+  if (!el) return;
+  el.querySelector(".snapshot")?.remove();
+  if (data.snapshot) (el.querySelector("p") ?? el).append(htl.html`<span class="snapshot"> · Data checked up to ${fmtDate(data.snapshot, { day: "numeric", month: "long", year: "numeric" })}</span>`);
+  return data.snapshot;
+}
+
+// Repository (for "Report an issue"): derived from the github.io address when hosted.
+REPO_URL = {
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/i);
+  if (!m) return null;
+  const first = location.pathname.split("/").filter(Boolean)[0];
+  const repo = first && !first.endsWith(".html") ? first : `${m[1]}.github.io`;
+  return `https://github.com/${m[1]}/${repo}`;
+}
+
+// Opens the "Report a record" issue form (.github/ISSUE_TEMPLATE/report-record.yml), prefilled for one record.
+// Reports arrive as GitHub Issues; no email address is shown on the site.
+function issueUrl(o) {
+  if (!REPO_URL) return null;
+  return `${REPO_URL}/issues/new` + qs({
+    template: "report-record.yml",
+    title: `Record ${o.id}: ${o.name}`,
+    record: `${o.id}: ${o.name} (${o.org.name})`,
+    source: o.source_url
+  });
+}
+
+REPORT_FORM_URL = REPO_URL ? `${REPO_URL}/issues/new?template=report-record.yml` : null
+
+// ---- Render helpers ----------------------------------------------------------------
+
+orgHref = id => `organisation.html${qs({ org: id })}`
+cityHref = slug => `place.html${qs({ city: slug })}`
+countryHref = slug => `place.html${qs({ country: slug })}`
+
+function fundingSummary(o) {
+  if (!o.hasAmount) return "amount not stated";
+  const period = o.funding_period ? ` ${o.funding_period.toLowerCase()}` : "";
+  return `${o.funding_currency ? o.funding_currency + " " : ""}${fmtNumber(o.funding_amount)}${period}`;
+}
+
+// funding_note without a trailing "(amount not stated)": the card already says so next to the funding type.
+function fundingNote(o) {
+  const t = (o.funding_note ?? "").replace(/\s*\(amount not stated\)\s*$/i, "").trim();
+  return t || null;
+}
+
+function durationText(o) {
+  if (o.duration_note) return o.duration_note;
+  if (o.duration_max_weeks != null) return `Up to ${o.duration_max_weeks} weeks`;
+  return "Duration not confirmed";
+}
+
+function visaText(org) {
+  const scope = org.visa_scope ? `, in ${org.visa_scope}` : "";
+  if (org.visa_exempt === "Yes") return `Visa-exempt: yes${scope}`;
+  if (org.visa_exempt === "No") return `Visa-exempt: no${scope}`;
+  return "Visa exemption not stated";
+}
+
+function deadlineText(o) {
+  const parts = [];
+  if (o.next_deadline) parts.push(o.deadline && /^\d{4}-\d{2}-\d{2}$/.test(o.next_deadline) ? fmtDate(o.next_deadline) : o.next_deadline);
+  if (o.deadline_type) parts.push(o.deadline_type);
+  return parts.length ? parts.join(" · ") : "Not stated";
+}
+
+function disciplineTag(d) {
+  return htl.html`<span class="disc-tag" style=${{ "--disc": DISCIPLINE_COLOURS[d] }}><span class="disc-dot" aria-hidden="true"></span>${DISCIPLINE_LABELS[d]}</span>`;
+}
+
+function statusBadge(o) {
+  return o.verified
+    ? htl.html`<span class="badge-verified">Verified</span>`
+    : htl.html`<span class="badge-unverified">Unverified</span>`;
+}
+
+ICON_EXTERNAL = () => htl.svg`<svg class="icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2h5v5M14 2 7.5 8.5M12 9.5V14H2V4h4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`
+
+function extLink(href, text) {
+  return htl.html`<a href=${href} target="_blank" rel="noopener" data-no-state>${text}${ICON_EXTERNAL()}<span class="visually-hidden"> (opens in a new tab)</span></a>`;
+}
+
+// Official pages move (vacancy links expire), so each card offers a standing
+// organisation page as a fallback when it differs from the record's own links.
+function fallbackLink(o) {
+  const used = new Set([o.source_url, o.application_url].filter(Boolean));
+  if (isUrl(o.org.careers_page) && !used.has(o.org.careers_page)) return { url: o.org.careers_page, text: "the organisation's careers page" };
+  if (isUrl(o.org.website) && !used.has(o.org.website)) return { url: o.org.website, text: "the organisation's website" };
+  return null;
+}
+
+// Opportunity card. Field order follows the build brief.
+function oppCard(o, { headingLevel = 3, showOrg = true } = {}) {
+  const h = headingLevel === 4 ? htl.html`<h4 class="opp-name">${o.name}</h4>` : htl.html`<h3 class="opp-name">${o.name}</h3>`;
+  const issue = issueUrl(o);
+  const selected = compareStore.has(o.id);
+  const fallback = fallbackLink(o);
+  return htl.html`<article class="opp-card" id=${"opp-" + o.id} data-id=${o.id}>
+    ${h}
+    ${showOrg ? htl.html`<p class="opp-org"><a href=${orgHref(o.org_id)}>${o.org.name}</a></p>` : null}
+    <p class="opp-place"><a href=${cityHref(o.citySlug)}>${o.city}</a>, <a href=${countryHref(o.countrySlug)}>${o.country}</a>${o.location_note && o.location_note !== o.city ? htl.html`<span class="muted"> · ${o.location_note}</span>` : null}</p>
+    <p class="opp-tags"><span class="type-tag">${o.opportunity_type}</span>${o.isResearch ? htl.html`<span class="research-tag">Research visit</span>` : null}${disciplineTag(o.discipline_area)}</p>
+    <dl class="opp-facts">
+      <div><dt>Funding</dt><dd>${o.funding_type} · ${o.hasAmount ? htl.html`<strong>${fundingSummary(o)}</strong>` : htl.html`<span class="muted">amount not stated</span>`}${fundingNote(o) ? htl.html`<span class="fact-detail">${fundingNote(o)}</span>` : null}</dd></div>
+      <div><dt>Duration</dt><dd>${durationText(o)}</dd></div>
+      <div><dt>Career stage</dt><dd>${o.career_stage ?? "Not stated"}</dd></div>
+      ${o.nationality_note ? htl.html`<div><dt>Eligibility</dt><dd>${o.nationality_note}</dd></div>` : null}
+    </dl>
+    <div class="opp-status">${statusBadge(o)}${o.verified ? null : htl.html`<p class="unverified-note"><strong>Still to confirm:</strong> ${o.status_reasons}. Confirm nationality and right-to-work terms in the current vacancy notice before applying.</p>`}</div>
+    <dl class="opp-facts">
+      <div><dt>Visa</dt><dd>${visaText(o.org)}</dd></div>
+      <div><dt>Deadline</dt><dd>${deadlineText(o)}</dd></div>
+    </dl>
+    <p class="opp-links">${extLink(o.source_url, "Official source")}${o.application_url && o.application_url !== o.source_url ? extLink(o.application_url, "Apply") : null}<span class="link-age">checked ${fmtDate(o.last_checked)}</span></p>
+    ${fallback ? htl.html`<p class="link-fallback">Link not working? Try ${extLink(fallback.url, fallback.text)}.</p>` : null}
+    <div class="opp-foot">
+      ${issue ? htl.html`<a class="muted" href=${issue} target="_blank" rel="noopener" data-no-state>Report an issue<span class="visually-hidden"> with ${o.name} (opens in a new tab)</span></a>` : null}
+      <button type="button" class="btn-compare" data-compare=${o.id} aria-pressed=${selected ? "true" : "false"}>${selected ? "Remove from compare" : "Add to compare"}</button>
+    </div>
+  </article>`;
+}
+
+// Wires "Add to compare" buttons inside a container; keeps their state in sync.
+function wireCompare(container, invalidation) {
+  const sync = () => {
+    for (const b of container.querySelectorAll("button[data-compare]")) {
+      const on = compareStore.has(b.dataset.compare);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      b.textContent = on ? "Remove from compare" : "Add to compare";
+    }
+  };
+  container.addEventListener("click", e => {
+    const b = e.target.closest("button[data-compare]");
+    if (!b) return;
+    const id = b.dataset.compare;
+    if (compareStore.has(id)) compareStore.remove(id);
+    else compareStore.add(id, b);
+  });
+  sync();
+  const off = compareStore.subscribe(sync);
+  invalidation?.then(off);
+  return container;
+}
+
+// ---- Map helpers (Leaflet is loaded only on pages with a map) ---------------------------
+
+// OpenStreetMap standard tiles (no API key; usage policy: https://operations.osmfoundation.org/policies/tiles/).
+// Shown in greyscale via CSS for a light basemap.
+TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+
+// Capped square-root scale for marker radius (px); at least 24px across (WCAG target size).
+function markerRadius(n, max) {
+  const r = 12 + 18 * Math.sqrt(n / Math.max(max, 1));
+  return Math.min(30, Math.round(r));
+}
+
+// One summary row per city for the given opportunities.
+function citySummaries(rows) {
+  return d3.sort([...d3.group(rows, o => o.city)].map(([city, list]) => {
+    const p = data.placeByCity.get(city);
+    return {
+      city, slug: slugify(city), country: p.country, countrySlug: slugify(p.country),
+      lat: p.latitude, lng: p.longitude, n: list.length,
+      verified: list.filter(o => o.verified).length,
+      byDisc: Object.fromEntries(["STEM", "Social sciences", "Any"].map(d => [d, list.filter(o => o.discipline_area === d).length])),
+      visaRule: p.visa_rule, visaSource: p.visa_rule_source
+    };
+  }), c => -c.n, c => c.city);
+}
+
+// Creates a Leaflet map inside `el` (already in the document) and returns it.
+function createMap(L, el, { interactive = true } = {}) {
+  const map = L.map(el, {
+    zoomControl: interactive, scrollWheelZoom: false, dragging: interactive, keyboard: interactive,
+    doubleClickZoom: interactive, boxZoom: false, touchZoom: interactive, minZoom: 3, maxZoom: 12,
+    attributionControl: true
+  });
+  map.setView([50, 10], 4);
+  // Recompute the size once laid out (and whenever the container resizes).
+  const ro = new ResizeObserver(() => map.invalidateSize());
+  ro.observe(el);
+  map.on("unload", () => ro.disconnect());
+  // Tiles load after the page's figures have painted.
+  requestAnimationFrame(() => setTimeout(() => {
+    L.tileLayer(TILE_URL, { attribution: TILE_ATTRIBUTION, maxZoom: 12 }).addTo(map);
+  }, 50));
+  return map;
+}
+
+// Draws city markers (focusable, keyboard-operable links). Returns the layer.
+function drawCityMarkers(L, map, cities, { labelMin = 3, maxN, fit = true, dim = false } = {}) {
+  const layer = L.layerGroup().addTo(map);
+  const max = maxN ?? d3.max(cities, c => c.n) ?? 1;
+  for (const c of cities) {
+    const r = markerRadius(c.n, max);
+    const label = c.n >= labelMin ? `<span class="city-marker-label">${c.city}</span>` : "";
+    const icon = L.divIcon({
+      className: "city-marker" + (dim ? " is-dim" : ""),
+      html: `<span class="city-marker-dot" style="width:${2 * r}px;height:${2 * r}px">${r >= 12 ? c.n : ""}</span>${label}`,
+      iconSize: [2 * r, 2 * r], iconAnchor: [r, r]
+    });
+    const m = L.marker([c.lat, c.lng], { icon, keyboard: true, riseOnHover: true, title: "" }).addTo(layer);
+    const disc = ["STEM", "Social sciences", "Any"].filter(d => c.byDisc[d])
+      .map(d => `${DISCIPLINE_LABELS[d]} ${c.byDisc[d]}`).join(" · ");
+    m.bindTooltip(`<strong>${c.city}, ${c.country}</strong><br>${plural(c.n, "opportunity", "opportunities")} (${c.verified} verified)<br>${disc}<br><span class="tt-visa">${c.visaRule ?? "No host-country rule recorded."}</span><br><span class="tt-link">Open the ${c.city} page</span>`,
+      { direction: "top", offset: [0, -r], className: "city-tooltip", opacity: 1 });
+    m.on("click", () => { location.href = "place.html" + qs({ city: c.slug, compare: compareStore.get().join(",") || null }); });
+    const el = m.getElement();
+    if (el) {
+      el.setAttribute("role", "link");
+      el.setAttribute("aria-label", `${c.city}, ${c.country}: ${plural(c.n, "opportunity", "opportunities")}. Open city page.`);
+      el.addEventListener("focus", () => m.openTooltip());
+      el.addEventListener("blur", () => m.closeTooltip());
+    }
+  }
+  if (fit && cities.length) {
+    const b = L.latLngBounds(cities.map(c => [c.lat, c.lng]));
+    map.fitBounds(b.pad(0.15), { maxZoom: cities.length === 1 ? 9 : 6 });
+  }
+  return layer;
+}
+
+// Accessible table alternative for the map.
+function cityTable(cities, caption) {
+  return htl.html`<div class="table-scroll"><table class="data-table">
+    <caption>${caption}</caption>
+    <thead><tr><th scope="col">City</th><th scope="col">Country</th><th scope="col" class="num">Opportunities</th><th scope="col" class="num">Verified</th><th scope="col" class="num">STEM</th><th scope="col" class="num">Social sciences</th><th scope="col" class="num">Any field</th></tr></thead>
+    <tbody>${cities.map(c => htl.html`<tr>
+      <th scope="row"><a href=${cityHref(c.slug)}>${c.city}</a></th>
+      <td><a href=${countryHref(c.countrySlug)}>${c.country}</a></td>
+      <td class="num">${c.n}</td><td class="num">${c.verified}</td>
+      <td class="num">${c.byDisc.STEM}</td><td class="num">${c.byDisc["Social sciences"]}</td><td class="num">${c.byDisc.Any}</td>
+    </tr>`)}</tbody>
+  </table></div>`;
+}
+
+// Horizontal bar list with visible labels and values (doubles as its own data table).
+function barList(items, { colour = () => "var(--accent)", href = null } = {}) {
+  const max = d3.max(items, d => d.value) || 1;
+  return htl.html`<ul class="bar-list">${items.map(d => htl.html`<li>
+    <div class="bar-row"><span>${href ? htl.html`<a href=${href(d)}>${d.label}</a>` : d.label}</span><strong>${d.value}</strong></div>
+    <div class="bar-track" aria-hidden="true"><div class="bar-fill" style=${{ width: `${(100 * d.value) / max}%`, background: colour(d) }}></div></div>
+  </li>`)}</ul>`;
+}
+
+function notFound(what, back) {
+  return htl.html`<div class="tile not-found" role="status">
+    <h1>${what} not found</h1>
+    <p>This link does not match anything in the current data. It may have been renamed or removed.</p>
+    <p>${back}</p>
+  </div>`;
+}
+
+function setTitle(t) { document.title = `${t} – International Organisation Internship Opportunities`; }
+```

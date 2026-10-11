@@ -1,0 +1,74 @@
+name: Link check
+
+# Checks every link the site displays and keeps one open issue listing the broken ones.
+# Maintenance only: it does not build or deploy the site.
+
+on:
+  schedule:
+    - cron: "0 6 1 * *" # 06:00 UTC on the 1st of each month
+  push:
+    branches: [main]
+    paths: [data/database.xlsx]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: link-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: List links shown on the site
+        run: |
+          pip install --quiet openpyxl==3.1.5
+          python .github/scripts/links.py list data/database.xlsx links.txt links-map.json
+
+      - name: Check links
+        id: lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --no-progress
+            --accept 100..=103,200..=299,403,429
+            --max-concurrency 4
+            --max-retries 2
+            --timeout 30
+            --user-agent "Mozilla/5.0 (compatible; link check for International Organisation Internship Opportunities)"
+            links.txt
+          format: json
+          output: lychee.json
+          fail: false
+
+      - name: Summarise broken links
+        id: report
+        run: python .github/scripts/links.py report lychee.json links-map.json issue.md
+
+      - name: Open, update or close the broken-links issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BROKEN: ${{ steps.report.outputs.broken }}
+        run: |
+          gh label create broken-links --color B5730A --description "Links in data/database.xlsx that no longer work" 2>/dev/null || true
+          existing=$(gh issue list --label broken-links --state open --json number --jq '.[0].number')
+          if [ "$BROKEN" != "0" ]; then
+            if [ -n "$existing" ]; then
+              gh issue edit "$existing" --body-file issue.md
+            else
+              gh issue create --title "Broken links in data/database.xlsx" --label broken-links --body-file issue.md
+            fi
+          elif [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "All links work again (checked by run ${{ github.run_id }})."
+          fi

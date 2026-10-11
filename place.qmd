@@ -1,0 +1,181 @@
+---
+pagetitle: "Places"
+description: "Host cities and countries of funded visits at international organisations in Europe."
+---
+
+{{< include _load.qmd >}}
+
+```{ojs}
+//| output: false
+// Which page: ?city=<slug>, ?country=<slug>, or the index of all places.
+placeQuery = {
+  const city = slugify(urlParams.get("city") ?? "");
+  const country = slugify(urlParams.get("country") ?? "");
+  if (city) {
+    const p = data.places.find(p => p.slug === city);
+    return p ? { mode: "city", name: p.city, country: p.country, countrySlug: p.countrySlug, rows: p.opps, places: [p] }
+             : { mode: "missing", what: "City", slug: city };
+  }
+  if (country) {
+    const c = countries.find(c => c.slug === country);
+    return c ? { mode: "country", name: c.country, rows: c.opps, places: data.places.filter(p => p.countrySlug === country) }
+             : { mode: "missing", what: "Country", slug: country };
+  }
+  return { mode: "index", name: "Places", rows: opps, places: data.places };
+}
+
+placeTitle = setTitle(placeQuery.mode === "missing" ? `${placeQuery.what} not found` : placeQuery.name)
+placeCities = placeQuery.mode === "missing" ? [] : citySummaries(placeQuery.rows)
+
+function smallBarChart(items, { label, colour = () => "#1A5BB5" }) {
+  const data = items.filter(d => d.value > 0);
+  const svg = Plot.plot({
+    ariaLabel: label,
+    ariaDescription: data.map(d => `${d.label}: ${d.value}`).join("; "),
+    width: 360,
+    height: 30 * data.length + 34,
+    marginLeft: 130,
+    marginRight: 30,
+    style: { fontFamily: "'Source Sans 3', sans-serif", fontSize: "13px", background: "transparent" },
+    x: { label: null, grid: true, tickFormat: "d", ticks: Math.min(5, d3.max(data, d => d.value) ?? 1) },
+    y: { label: null, domain: data.map(d => d.label) },
+    marks: [
+      Plot.barX(data, { x: "value", y: "label", fill: d => colour(d), rx: 3 }),
+      Plot.text(data, { x: "value", y: "label", text: "value", dx: 6, textAnchor: "start", fill: "#15202B" }),
+      Plot.ruleX([0])
+    ]
+  });
+  // One labelled image for assistive tech (the table below holds the same data).
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${label}: ${data.map(d => `${d.label} ${d.value}`).join(", ")}`);
+  for (const g of svg.querySelectorAll("[aria-label]")) if (g !== svg) g.removeAttribute("aria-label");
+  return svg;
+}
+
+function chartTile(title, items, opts) {
+  const id = "h-" + slugify(title);
+  return htl.html`<section class="tile chart-tile" aria-labelledby=${id}>
+    <h2 id=${id} class="tile-title">${title}</h2>
+    <figure>${smallBarChart(items, { label: title, ...opts })}</figure>
+    <details><summary>Show as a table</summary>
+      <table class="data-table compact"><thead><tr><th scope="col">${title.replace(/^By /, "").replace(/^./, c => c.toUpperCase())}</th><th scope="col" class="num">Opportunities</th></tr></thead>
+      <tbody>${items.map(d => htl.html`<tr><th scope="row">${d.label}</th><td class="num">${d.value}</td></tr>`)}</tbody></table>
+    </details>
+  </section>`;
+}
+```
+
+```{ojs}
+viewof placeHead = {
+  const q = placeQuery;
+  if (q.mode === "missing") {
+    const node = notFound(q.what, htl.html`<a href="place.html">See all places</a> or <a href="index.html">go to the overview</a>.`);
+    node.value = null;
+    return node;
+  }
+  const rows = q.rows;
+  const verified = rows.filter(o => o.verified).length;
+  const orgCount = new Set(rows.map(o => o.org_id)).size;
+  const crumbs = q.mode === "city"
+    ? htl.html`<p class="crumbs"><a href="place.html">Places</a> › <a href=${countryHref(q.countrySlug)}>${q.country}</a></p>`
+    : q.mode === "country" ? htl.html`<p class="crumbs"><a href="place.html">Places</a></p>` : null;
+  const counts = `${plural(rows.length, "opportunity", "opportunities")} (${verified} verified, ${rows.length - verified} unverified) at ${plural(orgCount, "organisation")}`
+    + (q.mode === "city" ? "" : ` in ${plural(placeCities.length, "host city", "host cities")}`)
+    + (q.mode === "index" ? ` across ${plural(countries.length, "country", "countries")}` : "");
+
+  // Visa rule(s) for the place, from the Places sheet.
+  const rules = d3.groups(q.places, p => p.visa_rule ?? "No host-country rule recorded.");
+  const visa = htl.html`<section class="tile" aria-labelledby="h-visa">
+    <h2 id="h-visa" class="tile-title">Host-country visa rule</h2>
+    ${rules.map(([rule, ps]) => htl.html`<p>${q.mode === "city" ? null : htl.html`<strong>${ps.map(p => p.city).join(", ")}:</strong> `}${rule}
+      ${ps[0].visa_rule_source ? htl.html`<br>${extLink(ps[0].visa_rule_source, "Official source")}` : null}</p>`)}
+    <p class="muted">Visa needs also depend on your nationality, and host-country authorities decide each case. Each organisation's own visa value is shown on its opportunities.</p>
+  </section>`;
+
+  const node = htl.html`<div>
+    <header class="page-head">
+      ${crumbs}
+      <h1>${q.name}</h1>
+      <p class="lead-count">${counts}</p>
+    </header>
+    <div class="tile-grid tile-grid-2">
+      <section class="tile map-tile" aria-labelledby="h-map">
+        <h2 id="h-map" class="tile-title">Map</h2>
+        <div class="leaflet-map mini" role="region" aria-label=${`Map of ${q.name}. The host cities are also listed in the table below.`}></div>
+      </section>
+      ${q.mode === "index" ? htl.html`<section class="tile" aria-labelledby="h-countries">
+        <h2 id="h-countries" class="tile-title">Countries</h2>
+        <ul class="kv-list">${countries.map(c => htl.html`<li><a href=${countryHref(c.slug)}>${c.country}</a><span>${plural(c.opps.length, "opportunity", "opportunities")} · ${plural(c.cities.length, "city", "cities")}</span></li>`)}</ul>
+      </section>` : visa}
+    </div>
+  </div>`;
+  node.value = node.querySelector(".leaflet-map");
+  return node;
+}
+```
+
+```{ojs}
+//| output: false
+L = require("leaflet@1.9.4")
+
+placeMap = {
+  const el = placeHead;
+  if (!el) return null;
+  while (!el.isConnected) await new Promise(requestAnimationFrame);
+  const map = createMap(L, el);
+  const layer = drawCityMarkers(L, map, placeCities, { labelMin: placeQuery.mode === "index" ? 3 : 1, maxN: d3.max(citySummaries(opps), c => c.n) });
+  invalidation.then(() => map.remove());
+  return map;
+}
+```
+
+```{ojs}
+{
+  const q = placeQuery;
+  if (q.mode === "missing") return htl.html`<span></span>`;
+  const rows = q.rows;
+  const disc = ["STEM", "Social sciences", "Any"].map(d => ({ key: d, label: DISCIPLINE_LABELS[d], value: rows.filter(o => o.discipline_area === d).length }));
+  const types = ENUMS.opportunity_type.map(t => ({ label: t, value: rows.filter(o => o.opportunity_type === t).length })).filter(d => d.value);
+  const funding = ENUMS.funding_type.map(t => ({ label: t, value: rows.filter(o => o.funding_type === t).length })).filter(d => d.value);
+  return htl.html`<div class="tile-grid tile-grid-3">
+    ${chartTile("By discipline", disc.filter(d => d.value), { colour: d => DISCIPLINE_COLOURS[d.key] })}
+    ${chartTile("By type", types, {})}
+    ${chartTile("By funding type", funding, {})}
+  </div>`;
+}
+```
+
+```{ojs}
+{
+  const q = placeQuery;
+  if (q.mode === "missing") return htl.html`<span></span>`;
+  if (q.mode !== "city") {
+    return htl.html`<section aria-labelledby="h-cities" class="org-block">
+      <h2 id="h-cities">${q.mode === "country" ? `Cities in ${q.name}` : "Host cities"}</h2>
+      <nav class="pill-row" aria-label="Cities">${placeCities.map(c => htl.html`<a class="pill" href=${cityHref(c.slug)}>${c.city}<span class="count">${c.n}</span></a>`)}</nav>
+      <details open=${q.mode === "country"}><summary>City table</summary>${cityTable(placeCities, `Host cities${q.mode === "country" ? ` in ${q.name}` : ""}, by number of opportunities`)}</details>
+    </section>`;
+  }
+  return htl.html`<span></span>`;
+}
+```
+
+```{ojs}
+{
+  const q = placeQuery;
+  if (q.mode === "missing" || q.mode === "index") return htl.html`<span></span>`;
+  const groups = d3.sort(d3.groups(sortRows(q.rows, "country"), o => o.org_id), ([, list]) => list[0].org.name);
+  const container = htl.html`<section aria-labelledby="h-orgs">
+    <h2 id="h-orgs" class="visually-hidden">Organisations in ${q.name}</h2>
+    ${groups.map(([id, list]) => {
+      const org = list[0].org;
+      return htl.html`<section class="org-block" aria-labelledby=${"org-" + id}>
+        <h2 id=${"org-" + id}><a href=${orgHref(id)}>${org.name}</a></h2>
+        <p class="muted">${org.org_type} · ${visaText(org)} · ${plural(list.length, "opportunity", "opportunities")}</p>
+        <ul class="card-list">${list.map(o => htl.html`<li>${oppCard(o, { showOrg: false })}</li>`)}</ul>
+      </section>`;
+    })}
+  </section>`;
+  return wireCompare(container, invalidation);
+}
+```

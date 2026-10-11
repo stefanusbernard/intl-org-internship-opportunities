@@ -1,0 +1,223 @@
+---
+pagetitle: "International Organisation Internship Opportunities"
+description: "Funded visits of up to 6 months at international organisations across Europe (EU, EEA, Switzerland, UK), open to master's and PhD students of any nationality."
+---
+
+{{< include _load.qmd >}}
+
+<noscript>This site needs JavaScript to read its database. The data file is <a href="data/database.xlsx">data/database.xlsx</a>.</noscript>
+
+```{ojs}
+htl.html`<div class="home-head">
+  <h1>${opps.length} funded visits at international organisations, open to every nationality</h1>
+  <form class="search-form" action="opportunities.html" method="get" role="search">
+    <label for="home-search" class="visually-hidden">Search opportunities</label>
+    <input id="home-search" name="q" type="search" placeholder="Search organisation, programme or city" autocomplete="off">
+    <button type="submit" class="btn-primary-pill">Search</button>
+  </form>
+</div>`
+```
+
+```{ojs}
+//| output: false
+homeFilters = ({ ...readFilterState(urlParams), discipline: homeDiscipline })
+homeRows = applyFilters(opps, homeFilters)
+homeCities = citySummaries(homeRows)
+phdVisits = d3.sort(homeRows.filter(o => o.isResearch && o.phd),
+  o => !o.verified, o => o.deadline ?? new Date(8.64e15), o => o.name)
+homeUrlSync = updateUrl({ discipline: homeDiscipline || null })
+shortOrg = name => name?.match(/\(([^)]+)\)\s*$/)?.[1] ?? name
+otherFilters = describeFilters({ ...homeFilters, discipline: "" })
+```
+
+```{ojs}
+{
+  const verified = homeRows.filter(o => o.verified).length;
+  const unverified = homeRows.length - verified;
+  const orgCount = new Set(homeRows.map(o => o.org_id)).size;
+  const countryCount = new Set(homeRows.map(o => o.country)).size;
+  return htl.html`<div class="tile-grid">
+    <div class="tile figure-tile">
+      <div class="figure">${verified} <span class="figure-extra">+ ${unverified}</span></div>
+      <div class="figure-label">verified + unverified opportunities</div>
+    </div>
+    <div class="tile figure-tile">
+      <div class="figure">${orgCount}</div>
+      <div class="figure-label">organisations with an opportunity</div>
+    </div>
+    <div class="tile figure-tile">
+      <div class="figure">${homeCities.length}</div>
+      <div class="figure-label">host cities in ${plural(countryCount, "country", "countries")}</div>
+    </div>
+    <a class="tile figure-tile is-accent" href="#phd-band">
+      <div class="figure">${phdVisits.length}</div>
+      <div class="figure-label">funded PhD research visits</div>
+    </a>
+  </div>`;
+}
+```
+
+```{ojs}
+viewof homeDiscipline = {
+  const init = readFilterState(urlParams).discipline;
+  const choices = [["", "All fields"], ["stem", "STEM"], ["social-sciences", "Social sciences"]];
+  const tile = htl.html`<section class="tile map-tile" aria-labelledby="map-heading">
+    <div class="map-head">
+      <h2 id="map-heading">Where they are</h2>
+      <fieldset class="segmented">
+        <legend>Discipline</legend>
+        ${choices.map(([v, label]) => htl.html`<label><input type="radio" name="home-discipline" value=${v} checked=${v === init}><span>${label}</span></label>`)}
+      </fieldset>
+    </div>
+    <p class="filter-note muted" hidden></p>
+    <div class="map-wrap">
+      <div class="leaflet-map" role="region" aria-label="Map of host cities. The same information is in the city table below the map."></div>
+      <div class="map-empty" role="status" hidden></div>
+    </div>
+    <div class="map-below">
+      <p class="map-links"><a class="list-link" href="opportunities.html">See all as a list</a></p>
+      <details>
+        <summary>City table (same data as the map)</summary>
+        <div class="city-table-slot"></div>
+      </details>
+    </div>
+  </section>`;
+  tile.value = init;
+  tile.addEventListener("input", () => {
+    tile.value = tile.querySelector("input[name=home-discipline]:checked")?.value ?? "";
+  });
+  return tile;
+}
+```
+
+```{ojs}
+//| output: false
+L = require("leaflet@1.9.4")
+
+homeMap = {
+  const el = viewof homeDiscipline.querySelector(".leaflet-map");
+  while (!el.isConnected) await new Promise(requestAnimationFrame);
+  const map = createMap(L, el);
+  invalidation.then(() => map.remove());
+  return map;
+}
+
+homeMarkers = {
+  const tile = viewof homeDiscipline;
+  const allCities = citySummaries(opps);
+  const empty = homeCities.length === 0;
+  // Empty state: message over the map, all markers dimmed.
+  const layer = drawCityMarkers(L, homeMap, empty ? allCities : homeCities, {
+    maxN: d3.max(allCities, c => c.n), fit: true, dim: empty
+  });
+  invalidation.then(() => layer.remove());
+  const msg = tile.querySelector(".map-empty");
+  msg.hidden = !empty;
+  msg.textContent = empty ? `No opportunities match ${describeFilters(homeFilters).join(", ")}.` : "";
+  const note = tile.querySelector(".filter-note");
+  note.hidden = !otherFilters.length;
+  note.textContent = otherFilters.length ? `Also filtered by: ${otherFilters.join(", ")}.` : "";
+  tile.querySelector(".list-link").setAttribute("href", "opportunities.html" + qs(filterParams(homeFilters)));
+  tile.querySelector(".city-table-slot").replaceChildren(
+    cityTable(homeCities, `Host cities${homeFilters.discipline ? ` (${DISCIPLINE_FILTERS[homeFilters.discipline]}, including any-field records)` : ""}, by number of opportunities`));
+  return homeCities.length;
+}
+```
+
+```{ojs}
+{
+  const discCounts = ["STEM", "Social sciences", "Any"].map(d => ({
+    key: d, label: DISCIPLINE_LABELS[d], value: homeRows.filter(o => o.discipline_area === d).length
+  }));
+  const byCountry = d3.sort(d3.rollups(homeRows, v => v.length, o => o.country), ([c, n]) => -n, ([c]) => c);
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+  const dated = d3.sort(homeRows.filter(o => o.deadline && o.deadline >= today), o => o.deadline, o => o.name);
+  // Text-only deadlines fill the remaining slots: skip notes about closed sessions,
+  // and prefer those naming the nearest year ("Late January 2027").
+  const textYear = t => +(t.match(/\b(20\d\d)\b/)?.[1] ?? 9999);
+  const textual = d3.sort(homeRows.filter(o => !o.deadline && o.next_deadline && !/closed/i.test(o.next_deadline)),
+    o => textYear(o.next_deadline), o => o.name);
+  const upcoming = [...dated, ...textual].slice(0, 4);
+  const monthly = homeRows.filter(o => o.hasAmount && o.funding_period === "Per month");
+  const groups = d3.groups(monthly, o => `${o.funding_currency ?? ""}|${o.funding_amount}`).map(([, list]) => list);
+  // Name the programme when the same organisation appears in more than one row
+  // ("Schuman Traineeship, European Parliament"); skip the organisation if the name already contains it.
+  const orgRows = d3.rollup(groups.flatMap(list => [...new Set(list.map(o => o.org_id))]), v => v.length, id => id);
+  const programmeLabel = o => {
+    const name = o.name.replace(/\s*\([^)]*\)\s*$/, "");
+    const org = shortOrg(o.org.name);
+    return name.includes(org) ? name : `${name}, ${org}`;
+  };
+  const stipends = d3.sort(groups.map(list => ({
+    amount: list[0].funding_amount, currency: list[0].funding_currency,
+    who: [...new Set(list.map(o => orgRows.get(o.org_id) > 1 ? programmeLabel(o) : shortOrg(o.org.name)))].join(" · ")
+  })), s => -s.amount).slice(0, 5);
+  const noAmount = homeRows.filter(o => !o.hasAmount).length;
+  return htl.html`<div class="tile-grid">
+    <section class="tile" aria-labelledby="h-disc">
+      <h2 id="h-disc" class="tile-title">By discipline</h2>
+      ${barList(discCounts, { colour: d => DISCIPLINE_COLOURS[d.key] })}
+    </section>
+    <section class="tile" aria-labelledby="h-country">
+      <h2 id="h-country" class="tile-title">By country</h2>
+      <ul class="kv-list">${byCountry.slice(0, 6).map(([c, n]) => htl.html`<li><a href=${countryHref(slugify(c))}>${c}</a><span>${n}</span></li>`)}</ul>
+      <a class="tile-more" href="place.html">All ${plural(byCountry.length, "country", "countries")}</a>
+    </section>
+    <section class="tile" aria-labelledby="h-deadlines">
+      <h2 id="h-deadlines" class="tile-title">Upcoming deadlines</h2>
+      ${upcoming.length ? htl.html`<ul class="deadline-list">${upcoming.map(o => htl.html`<li>
+        <span class="when">${o.deadline ? fmtDate(o.deadline, { day: "numeric", month: "short" }) : htl.html`<span class="visually-hidden">No fixed date</span>`}</span>
+        <span><a href=${orgHref(o.org_id) + "#opp-" + o.id}>${o.name}</a>, ${shortOrg(o.org.name)}${o.deadline ? null : htl.html`<span class="fact-detail">${o.next_deadline}</span>`}</span>
+      </li>`)}</ul>` : htl.html`<p class="muted">No upcoming deadlines stated.</p>`}
+      <a class="tile-more" href=${"opportunities.html" + qs({ ...filterParams(homeFilters), sort: "deadline" })}>All by deadline</a>
+    </section>
+    <section class="tile" aria-labelledby="h-stipends">
+      <h2 id="h-stipends" class="tile-title">Stated monthly stipends</h2>
+      <p class="tile-sub">Official figures only; ${noAmount} of ${homeRows.length} records state no amount</p>
+      ${stipends.length ? htl.html`<ul class="kv-list">${stipends.map(s => htl.html`<li><span>${s.who}</span><strong>${s.currency ?? ""} ${fmtNumber(s.amount)}</strong></li>`)}</ul>` : htl.html`<p class="muted">None stated.</p>`}
+      <a class="tile-more" href=${"opportunities.html" + qs({ ...filterParams(homeFilters), amount: "1", sort: "amount" })}>All stated amounts</a>
+    </section>
+  </div>`;
+}
+```
+
+```{ojs}
+{
+  // Rolling programmes accept applications at any time: the most stable option, so they get their own row.
+  const rolling = sortRows(homeRows.filter(o => o.deadline_type === "Rolling"), "country");
+  return htl.html`<section class="tile rolling-tile" aria-labelledby="h-rolling">
+    <div class="band-head">
+      <h2 id="h-rolling" class="tile-title">Apply any time</h2>
+      <a href=${"opportunities.html" + qs({ ...filterParams(homeFilters), deadline: "rolling" })}>See all ${rolling.length} with rolling applications</a>
+    </div>
+    <p class="tile-sub">No fixed deadline: these programmes take applications all year.</p>
+    ${rolling.length ? htl.html`<ul class="rolling-list">${rolling.slice(0, 6).map(o => htl.html`<li>
+      <a href=${orgHref(o.org_id) + "#opp-" + o.id}>${o.name}</a>
+      <span class="muted">${shortOrg(o.org.name)} · ${o.city} · ${o.hasAmount ? fundingSummary(o) : o.funding_type}</span>
+    </li>`)}</ul>` : htl.html`<p class="muted">No rolling programmes match the current filter.</p>`}
+  </section>`;
+}
+```
+
+```{ojs}
+htl.html`<section class="phd-band" id="phd-band" aria-labelledby="h-phd" tabindex="-1">
+  <div class="band-head">
+    <h2 id="h-phd">Funded research visits for PhD students</h2>
+    <a href=${"opportunities.html" + qs({ ...filterParams(homeFilters), type: "research", stage: "phd" })}>See all ${phdVisits.length}</a>
+  </div>
+  ${phdVisits.length ? htl.html`<ul class="band-cards">${phdVisits.slice(0, 4).map(o => htl.html`<li>
+    <a class="band-card" href=${orgHref(o.org_id) + "#opp-" + o.id}>
+      <strong>${o.name}</strong>
+      <span class="band-meta">${shortOrg(o.org.name)} · ${o.city} · ${durationText(o)}</span>
+      <span class="band-extra">${o.deadline && o.deadline >= new Date() ? `Deadline ${fmtDate(o.deadline)}` : o.hasAmount ? fundingSummary(o) : o.funding_type}</span>
+    </a>
+  </li>`)}</ul>` : htl.html`<p>No research visits match the current filter.</p>`}
+</section>`
+```
+
+```{ojs}
+htl.html`<nav class="pill-row" aria-labelledby="h-cities">
+  <h2 id="h-cities">Browse by city</h2>
+  ${homeCities.map(c => htl.html`<a class="pill" href=${cityHref(c.slug)}>${c.city}<span class="count">${c.n}</span></a>`)}
+</nav>`
+```

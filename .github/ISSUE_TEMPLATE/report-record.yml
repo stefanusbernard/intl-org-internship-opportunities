@@ -1,0 +1,43 @@
+name: Report a record
+description: A broken link, changed amount, closed programme or other error in a listed opportunity.
+title: "Record: "
+labels: ["record-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping keep the list accurate. Please don't include personal details: this report is public.
+  - type: input
+    id: record
+    attributes:
+      label: Record
+      description: Filled in when you use the "Report an issue" link on a card.
+      placeholder: "EU-048: ILO Internship Programme (International Labour Organization)"
+    validations:
+      required: true
+  - type: dropdown
+    id: problem
+    attributes:
+      label: What is wrong?
+      options:
+        - Link is broken or has moved
+        - Funding amount or type has changed
+        - Deadline has changed
+        - Programme has closed
+        - Eligibility or nationality rule has changed
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: What should it say instead?
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Official page with the correct information
+      description: The organisation's own website, if you have it.
+      placeholder: https://

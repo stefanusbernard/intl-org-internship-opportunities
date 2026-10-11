@@ -1,0 +1,78 @@
+project:
+  type: website
+  output-dir: _site
+  resources:
+    - data/database.xlsx
+    - fonts/OFL-*.txt
+    - images/
+
+lang: en-GB
+
+execute:
+  echo: false
+
+website:
+  title: "International Organisation Internship Opportunities"
+  description: "Funded visits across Europe, open to all nationalities"
+  # Full public address: needed for absolute link-preview image URLs (WhatsApp, Slack, LinkedIn).
+  site-url: https://stefanusbernard.github.io/intl-org-internship-opportunities/
+  favicon: images/favicon.svg
+  image: images/social-card.png
+  open-graph:
+    locale: en_GB
+    site-name: International Organisation Internship Opportunities
+    image-alt: "International Organisation Internship Opportunities: funded visits across Europe, open to all nationalities"
+  twitter-card:
+    card-style: summary_large_image
+    image-alt: "International Organisation Internship Opportunities: funded visits across Europe, open to all nationalities"
+  page-navigation: false
+  search: false
+  navbar:
+    background: light
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: opportunities.qmd
+        text: Opportunities
+      - href: place.qmd
+        text: Places
+      - href: opportunities.qmd#compare
+        text: Compare
+        id: nav-compare
+      - href: about.qmd
+        text: About
+  page-footer:
+    center: "© 2026 Stefanus Bernard"
+
+format:
+  html:
+    theme: [default, styles.scss]
+    page-layout: full
+    toc: false
+    smooth-scroll: false
+    anchor-sections: false
+    code-copy: false
+    include-in-header:
+      - text: |
+          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+          <script>
+          // No browser storage: Quarto's built-in scripts (tabsets, reader mode) get an
+          // in-memory stand-in, so nothing persists on the visitor's device.
+          (function () {
+            function memoryStorage() {
+              var m = {};
+              return {
+                getItem: function (k) { return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null; },
+                setItem: function (k, v) { m[k] = String(v); },
+                removeItem: function (k) { delete m[k]; },
+                clear: function () { m = {}; },
+                key: function (i) { return Object.keys(m)[i] || null; },
+                get length() { return Object.keys(m).length; }
+              };
+            }
+            try {
+              Object.defineProperty(window, "localStorage", { value: memoryStorage(), configurable: true });
+              Object.defineProperty(window, "sessionStorage", { value: memoryStorage(), configurable: true });
+            } catch (e) {}
+          })();
+          </script>

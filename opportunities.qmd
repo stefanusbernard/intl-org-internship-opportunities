@@ -1,0 +1,167 @@
+---
+title: "Opportunities"
+description: "Search and filter funded visits at international organisations in Europe, and compare up to three side by side."
+---
+
+{{< include _load.qmd >}}
+
+```{ojs}
+viewof filters = {
+  const init = readFilterState(urlParams);
+  const opt = (value, label, current) => htl.html`<option value=${value} selected=${value === current}>${label}</option>`;
+  const form = htl.html`<form class="tile" id="filters-form" role="search" aria-label="Filter opportunities">
+    <div class="filters">
+      <div class="field-search">
+        <label class="field-label" for="f-q">Search</label>
+        <input id="f-q" name="q" type="search" value=${init.q} placeholder="Name, organisation, summary or city" autocomplete="off">
+      </div>
+      <div>
+        <label class="field-label" for="f-discipline">Discipline</label>
+        <select id="f-discipline" name="discipline">
+          ${opt("", "All disciplines", init.discipline)}
+          ${opt("stem", "STEM (and any field)", init.discipline)}
+          ${opt("social-sciences", "Social sciences (and any field)", init.discipline)}
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="f-type">Type</label>
+        <select id="f-type" name="type">
+          ${opt("", "All types", init.type)}
+          ${Object.entries(TYPE_FILTERS).map(([k, v]) => opt(k, v.label, init.type))}
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="f-stage">Career stage</label>
+        <select id="f-stage" name="stage">
+          ${opt("", "Any career stage", init.stage)}
+          ${Object.entries(STAGE_FILTERS).map(([k, v]) => opt(k, v.label, init.stage))}
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="f-country">Country</label>
+        <select id="f-country" name="country">
+          ${opt("", "All countries", init.country)}
+          ${countries.map(c => opt(c.slug, `${c.country} (${c.opps.length})`, init.country))}
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="f-deadline">Deadline</label>
+        <select id="f-deadline" name="deadline">
+          ${opt("", "Any deadline", init.deadline)}
+          ${Object.entries(DEADLINE_FILTERS).map(([k, v]) => opt(k, `${v.label} (${opps.filter(o => o.deadline_type === v.value).length})`, init.deadline))}
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="f-sort">Sort by</label>
+        <select id="f-sort" name="sort">
+          ${Object.entries(SORTS).map(([k, label]) => opt(k, label, init.sort))}
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="f-view">Show as</label>
+        <select id="f-view" name="view">
+          ${opt("opportunities", "Opportunity cards", init.view)}
+          ${opt("organisations", "Organisation cards", init.view)}
+        </select>
+      </div>
+      <div class="field-wide checks-row">
+        <label><input type="checkbox" name="verified" checked=${init.verified}> Verified only</label>
+        <label><input type="checkbox" name="visa" checked=${init.visa}> Visa-exempt: yes</label>
+        <label><input type="checkbox" name="amount" checked=${init.amount}> Amount stated</label>
+        <button type="button" class="btn-plain" name="clear-filters">Clear filters</button>
+      </div>
+    </div>
+  </form>`;
+  const el = name => form.elements.namedItem(name);
+  const read = () => ({
+    q: el("q").value.trim(), discipline: el("discipline").value, type: el("type").value,
+    stage: el("stage").value, country: el("country").value, deadline: el("deadline").value, verified: el("verified").checked,
+    visa: el("visa").checked, amount: el("amount").checked, sort: el("sort").value, view: el("view").value
+  });
+  form.resetFilters = () => {
+    el("q").value = "";
+    for (const n of ["discipline", "type", "stage", "country", "deadline"]) el(n).value = "";
+    for (const n of ["verified", "visa", "amount"]) el(n).checked = false;
+    form.value = read();
+    form.dispatchEvent(new Event("input", { bubbles: true }));
+    el("q").focus();
+  };
+  el("clear-filters").addEventListener("click", form.resetFilters);
+  form.addEventListener("submit", e => e.preventDefault());
+  form.addEventListener("input", () => { form.value = read(); });
+  form.addEventListener("change", () => {
+    const v = read();
+    if (JSON.stringify(v) !== JSON.stringify(form.value)) { form.value = v; form.dispatchEvent(new Event("input", { bubbles: true })); }
+  });
+  form.value = read();
+  return form;
+}
+```
+
+```{ojs}
+//| output: false
+results = sortRows(applyFilters(opps, filters), filters.sort)
+activeFilters = describeFilters(filters)
+filtersUrlSync = updateUrl(filterParams(filters))
+```
+
+```{ojs}
+{
+  const n = results.length;
+  const status = htl.html`<p class="result-count" role="status">Showing <strong>${n}</strong> of ${plural(opps.length, "opportunity", "opportunities")}${activeFilters.length ? ` · ${activeFilters.join(" · ")}` : ""}.</p>`;
+  if (!n) {
+    return htl.html`<div>${status}<div class="tile empty-state">
+      <p><strong>No opportunities match</strong> ${activeFilters.join(", ")}.</p>
+      <button type="button" class="btn-compare" onclick=${() => document.getElementById("filters-form").resetFilters()}>Clear filters</button>
+    </div></div>`;
+  }
+  let body;
+  if (filters.view === "organisations") {
+    const groups = d3.groups(results, o => o.org_id).map(([id, list]) => ({ org: list[0].org, list }));
+    body = htl.html`<ul class="card-list">${groups.map(({ org, list }) => htl.html`<li><article class="tile org-card">
+      <h3><a href=${orgHref(org.org_id)}>${org.name}</a></h3>
+      <p class="muted">${org.org_type} · ${[...new Set(list.map(o => `${o.city}, ${o.country}`))].join("; ")}</p>
+      <p>${visaText(org)}</p>
+      <ul>${list.map(o => htl.html`<li><a href=${orgHref(org.org_id) + "#opp-" + o.id}>${o.name}</a> <span class="muted">(${o.opportunity_type}${o.isResearch ? ", research visit" : ""}; ${o.verification_status})</span></li>`)}</ul>
+    </article></li>`)}</ul>`;
+  } else {
+    body = wireCompare(htl.html`<ul class="card-list">${results.map(o => htl.html`<li>${oppCard(o)}</li>`)}</ul>`, invalidation);
+  }
+  return htl.html`<div><h2 class="visually-hidden">Results</h2>${status}${body}</div>`;
+}
+```
+
+```{ojs}
+{
+  const selected = compareIds.map(id => opps.find(o => o.id === id)).filter(Boolean);
+  const rows = [
+    ["Organisation", o => htl.html`<a href=${orgHref(o.org_id)}>${o.org.name}</a>`],
+    ["Location", o => `${o.city}, ${o.country}${o.location_note && o.location_note !== o.city ? ` (${o.location_note})` : ""}`],
+    ["Type", o => `${o.opportunity_type}${o.isResearch ? " (research visit)" : ""}`],
+    ["Funding", o => htl.html`${o.funding_type} · ${fundingSummary(o)}${fundingNote(o) ? htl.html`<span class="fact-detail">${fundingNote(o)}</span>` : null}`],
+    ["Duration", o => durationText(o)],
+    ["Career stage", o => o.career_stage ?? "Not stated"],
+    ["Eligibility note", o => o.nationality_note ?? "None stated"],
+    ["Visa", o => visaText(o.org)],
+    ["Deadline", o => deadlineText(o)],
+    ["Verification", o => htl.html`${statusBadge(o)}${o.verified ? null : htl.html`<span class="fact-detail">Still to confirm: ${o.status_reasons}</span>`}`],
+    ["Official source", o => htl.html`${extLink(o.source_url, "Official source")}<span class="fact-detail">checked ${fmtDate(o.last_checked)}</span>`]
+  ];
+  const section = htl.html`<section class="compare-section" id="compare" aria-labelledby="h-compare" tabindex="-1">
+    <h2 id="h-compare">Compare</h2>
+    ${selected.length === 0
+      ? htl.html`<p class="tile">Choose up to three opportunities with <strong>Add to compare</strong>. The selection is kept in the page address, so you can bookmark or share it.</p>`
+      : htl.html`<p>${plural(selected.length, "opportunity", "opportunities")} selected (up to 3). The page address holds this selection: copy it to share the comparison.</p>
+        <div class="table-scroll tile"><table class="data-table compare-table">
+          <caption>Selected opportunities side by side</caption>
+          <thead><tr><td></td>${selected.map(o => htl.html`<th scope="col"><div class="col-head">
+            <span>${o.name}</span>
+            <button type="button" class="btn-plain" onclick=${() => compareStore.remove(o.id)}>Remove<span class="visually-hidden"> ${o.name} from compare</span></button>
+          </div></th>`)}</tr></thead>
+          <tbody>${rows.map(([label, f]) => htl.html`<tr><th scope="row">${label}</th>${selected.map(o => htl.html`<td>${f(o)}</td>`)}</tr>`)}</tbody>
+        </table></div>`}
+  </section>`;
+  if (this === undefined && location.hash === "#compare") requestAnimationFrame(() => section.scrollIntoView());
+  return section;
+}
+```

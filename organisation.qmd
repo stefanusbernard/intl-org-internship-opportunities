@@ -1,0 +1,95 @@
+---
+pagetitle: "Organisations"
+description: "International organisations in Europe with funded visits open to all nationalities."
+---
+
+{{< include _load.qmd >}}
+
+```{ojs}
+//| output: false
+orgQuery = {
+  const id = (urlParams.get("org") ?? "").trim().toLowerCase();
+  if (!id) return { mode: "index" };
+  const org = data.orgs.find(o => o.org_id.toLowerCase() === id);
+  if (org) return { mode: "org", org };
+  return { mode: "missing", known: data.orgById.has(id) };
+}
+
+orgTitle = setTitle(orgQuery.mode === "org" ? orgQuery.org.name : orgQuery.mode === "index" ? "Organisations" : "Organisation not found")
+
+CONTACT_LABELS = ({
+  "general contact page": "Contact page",
+  "programme or general inbox": "Programme inbox",
+  "media/press contact page": "Media and press contact page"
+})
+```
+
+```{ojs}
+{
+  const q = orgQuery;
+  if (q.mode === "missing") {
+    return notFound("Organisation", htl.html`${q.known ? "This organisation has no listed opportunity at the moment. " : ""}<a href="organisation.html">See all organisations</a> or <a href="opportunities.html">browse all opportunities</a>.`);
+  }
+  if (q.mode === "index") {
+    const orgs = d3.sort(data.orgs, o => o.name);
+    return htl.html`<div>
+      <header class="page-head"><h1>Organisations</h1>
+        <p>${plural(orgs.length, "organisation")} with at least one listed opportunity.</p></header>
+      <div class="table-scroll tile"><table class="data-table">
+        <caption>Organisations, A to Z</caption>
+        <thead><tr><th scope="col">Organisation</th><th scope="col">Type</th><th scope="col">Host cities</th><th scope="col">Visa</th><th scope="col" class="num">Opportunities</th></tr></thead>
+        <tbody>${orgs.map(o => htl.html`<tr>
+          <th scope="row"><a href=${orgHref(o.org_id)}>${o.name}</a></th>
+          <td>${o.org_type}</td>
+          <td>${[...new Set(o.opps.map(x => x.city))].join(", ")}</td>
+          <td>${visaText(o)}</td>
+          <td class="num">${o.opps.length}</td>
+        </tr>`)}</tbody>
+      </table></div>
+    </div>`;
+  }
+  const org = q.org;
+  const list = sortRows(org.opps, "name");
+  const cities = [...new Map(list.map(o => [o.city, o])).values()];
+  const contact = org.contact_page
+    ? (/^mailto:/i.test(org.contact_page)
+        ? htl.html`<a href=${org.contact_page} data-no-state>${CONTACT_LABELS[org.contact_type] ?? "Contact"} (email)</a>`
+        : extLink(org.contact_page, CONTACT_LABELS[org.contact_type] ?? "Contact page"))
+    : null;
+  const container = htl.html`<div>
+    <header class="page-head">
+      <p class="crumbs"><a href="organisation.html">Organisations</a></p>
+      <h1>${org.name}</h1>
+      <p class="lead-count">${org.org_type} · ${plural(list.length, "opportunity", "opportunities")} (${list.filter(o => o.verified).length} verified)</p>
+    </header>
+    <div class="tile-grid tile-grid-2">
+      <section class="tile" aria-labelledby="h-facts">
+        <h2 id="h-facts" class="tile-title">Facts</h2>
+        <dl class="facts">
+          <div><dt>Type</dt><dd>${org.org_type}</dd></div>
+          <div><dt>Location</dt><dd>${[org.city, org.country].filter(Boolean).join(", ")}</dd></div>
+          <div><dt>Hosts visitors in</dt><dd>${cities.map((o, i) => htl.html`${i ? ", " : ""}<a href=${cityHref(o.citySlug)}>${o.city}</a> (<a href=${countryHref(o.countrySlug)}>${o.country}</a>)`)}</dd></div>
+          ${org.website ? htl.html`<div><dt>Website</dt><dd>${extLink(org.website, org.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, ""))}</dd></div>` : null}
+          ${org.careers_page ? htl.html`<div><dt>Careers</dt><dd>${extLink(org.careers_page, "Official careers or traineeship page")}</dd></div>` : null}
+          ${contact ? htl.html`<div><dt>Contact</dt><dd>${contact}</dd></div>` : null}
+          ${org.last_checked ? htl.html`<div><dt>Links checked</dt><dd>${fmtDate(org.last_checked)}. Official pages move; if a link fails, start from the website above.</dd></div>` : null}
+        </dl>
+      </section>
+      <section class="tile" aria-labelledby="h-visa">
+        <h2 id="h-visa" class="tile-title">Visa</h2>
+        <p><strong>${visaText(org)}</strong></p>
+        ${org.visa_note ? htl.html`<p>${org.visa_note}</p>` : null}
+        ${org.visa_source_url ? htl.html`<p>${extLink(org.visa_source_url, "Official source for the visa value")}</p>` : null}
+        <p class="muted">The value applies only to the host country stated. Visa needs also depend on your nationality, and host-country authorities decide each case.</p>
+      </section>
+    </div>
+    <section class="org-block" aria-labelledby="h-opps">
+      <h2 id="h-opps">Opportunities</h2>
+      <ul class="card-list">${list.map(o => htl.html`<li>${oppCard(o, { showOrg: false })}</li>`)}</ul>
+    </section>
+  </div>`;
+  // Jump to a specific opportunity when linked as #opp-<id>.
+  if (location.hash.startsWith("#opp-")) requestAnimationFrame(() => document.getElementById(location.hash.slice(1))?.scrollIntoView());
+  return wireCompare(container, invalidation);
+}
+```

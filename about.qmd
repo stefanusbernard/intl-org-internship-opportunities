@@ -1,0 +1,46 @@
+---
+title: "About"
+description: "What this database covers, how records are verified, licences and how to report an issue."
+---
+
+{{< include _load.qmd >}}
+
+```{ojs}
+{
+  // Each non-empty row of the About sheet is one paragraph, in order.
+  // A short lead-in before the first colon ("Accuracy: ...") is shown in bold;
+  // a short row without a colon or full stop ("About this database") is a heading.
+  const para = text => {
+    if (text.length <= 60 && !/[:.]/.test(text)) return htl.html`<h2>${text}</h2>`;
+    const m = text.match(/^([^:]{2,40}):\s+(.*)$/s);
+    return m ? htl.html`<p><strong>${m[1]}:</strong> ${m[2]}</p>` : htl.html`<p>${text}</p>`;
+  };
+  return htl.html`<div class="about-text">${data.about.length ? data.about.map(para) : htl.html`<p class="muted">The About sheet is empty.</p>`}</div>`;
+}
+```
+
+## Sources and licences
+
+```{ojs}
+{
+  // Official seed lists only; internal research labels such as "v2 research (...)" are not shown.
+  const seeds = [...new Set(data.orgs.map(o => o.seed_source).filter(s => s && !/^v\d+\b/i.test(s)))].sort();
+  return htl.html`<div class="about-text">
+    <p>Every listed record links to the organisation's official website. Visa values cite the organisation or the host government. ${data.snapshot ? `The latest record check was on ${fmtDate(data.snapshot, { day: "numeric", month: "long", year: "numeric" })}.` : ""}</p>
+    <p>Official pages move, and vacancy pages expire. Each link shows the date it was checked; if one no longer works, use the organisation's careers page shown with it, or report the broken link below. The links are also checked automatically every month.</p>
+    <p><strong>Code:</strong> MIT licence. <strong>Data:</strong> Creative Commons Attribution 4.0 (CC BY 4.0).</p>
+    ${seeds.length ? htl.html`<p><strong>Organisation lists used:</strong> the organisations were identified from these official lists, with thanks to their publishers:</p>
+      <ul>${seeds.map(s => htl.html`<li>${s}</li>`)}</ul>` : null}
+    <p><strong>Map:</strong> map data &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener" data-no-state>OpenStreetMap contributors</a>.</p>
+    <p><strong>Before applying:</strong> confirm every detail with the organisation. Visa decisions rest with the host country.</p>
+  </div>`;
+}
+```
+
+## Report an issue
+
+```{ojs}
+REPORT_FORM_URL
+  ? htl.html`<p class="about-text">Spotted an outdated or wrong record? Use the "Report an issue" link on its card, which fills in the record for you, or <a href=${REPORT_FORM_URL} target="_blank" rel="noopener" data-no-state>open the report form on GitHub</a> (opens in a new tab). Reports are public GitHub issues and need a free GitHub account.</p>`
+  : htl.html`<p class="about-text">Spotted an outdated or wrong record? Use the "Report an issue" link on its card (the links appear on the published site). Reports are public GitHub issues and need a free GitHub account.</p>`
+```
